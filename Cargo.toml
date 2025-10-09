@@ -1,0 +1,14 @@
+[package]
+name = "bit-rc"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+reqwest = "0.12.23"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_bencode = "0.2.4"
+serde_bytes = "0.11"
+sha1 = "0.10.6"
+tokio = { version = "1.47.1", features = ["full"] }
+serde_urlencoded = "0.7"
+ 
