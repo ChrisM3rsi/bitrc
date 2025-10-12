@@ -28,7 +28,7 @@ impl Torrent {
 pub struct Info {
     pub name: String,
     #[serde(rename = "piece length")]
-    pub piece_length: i64,
+    pub piece_length: u64,
     pub pieces: ByteBuf,
-    pub length: i64,
+    pub length: u64,
 }

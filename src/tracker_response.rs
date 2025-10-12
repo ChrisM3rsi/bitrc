@@ -40,6 +40,7 @@ pub struct TrackerResponse {
                     .collect(),
             ))
         }
+
     }
 
     impl<'de> Deserialize<'de> for Peers {

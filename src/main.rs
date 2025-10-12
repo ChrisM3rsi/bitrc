@@ -1,24 +1,25 @@
 pub mod handshake;
+pub mod peer_message;
 pub mod torrent;
 pub mod tracker_request;
 pub mod tracker_response;
 
-use core::hash;
 use reqwest::Client;
-use serde_bytes::ByteBuf;
-use std::{fs, net::SocketAddrV4};
+use std::{error::Error, fs, net::SocketAddrV4, process::Command, time::Duration};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
 };
 
-use crate::{handshake::Handshake, torrent::Torrent, tracker_response::TrackerResponse};
+use crate::{
+    handshake::Handshake, peer_message::PeerMessage, torrent::Torrent,
+    tracker_response::TrackerResponse,
+};
 
 #[tokio::main]
 async fn main() {
     let torrent_file = fs::read("assets/ubuntu-25.04-desktop-amd64.iso.torrent").unwrap();
     let torrent_metadata: Torrent = serde_bencode::from_bytes(&torrent_file).unwrap();
-
 
     let hashed_info = torrent_metadata.hash_info();
 
@@ -31,8 +32,9 @@ async fn main() {
         compact: 1,
     };
 
-
     let client = Client::new();
+
+    print!("my hash info : {}", url_encode(&hashed_info));
 
     let query_params = serde_urlencoded::to_string(&request).unwrap();
     let tracker_url = format!(
@@ -41,7 +43,6 @@ async fn main() {
         query_params,
         url_encode(&hashed_info)
     );
-
 
     let response = client
         .get(&tracker_url)
@@ -53,7 +54,6 @@ async fn main() {
 
     let content: TrackerResponse = serde_bencode::from_bytes(&body).unwrap();
 
-
     println!("Found {} peers", content.peers.0.len());
 
     if let Some(first_peer) = content.peers.0.first() {
@@ -63,15 +63,13 @@ async fn main() {
             .try_into()
             .expect("peer_id must be exactly 20 bytes");
 
-        match connect_to_peer(
-            *first_peer,
-            hashed_info,
-            peer_id_bytes,
-        )
-        .await
-        {
+        match connect_to_peer(*first_peer, hashed_info, peer_id_bytes).await {
             Ok(stream) => {
                 println!("Successfully connected and handshaked with {}", first_peer);
+                let piece_data = download_piece(stream, 0, torrent_metadata.info.piece_length)
+                    .await
+                    .unwrap();
+
                 // Keep the stream for next milestone (downloading pieces)
             }
             Err(e) => {
@@ -155,4 +153,71 @@ pub async fn connect_to_peer(
     );
 
     Ok(stream)
+}
+
+async fn read_peer_message(stream: &mut TcpStream) -> Result<PeerMessage, Box<dyn Error>> {
+    let mut length_bytes = [0u8; 4];
+    stream.read_exact(&mut length_bytes).await.unwrap();
+
+    let length = u32::from_be_bytes(length_bytes);
+
+    if length == 0 {
+        return Ok(PeerMessage::KeepAlive);
+    }
+
+    let mut message_payload_bytes = vec![0u8; length as usize];
+
+    stream.read_exact(&mut message_payload_bytes).await.unwrap();
+
+    PeerMessage::from_bytes(&message_payload_bytes).map_err(|e| e.into())
+}
+
+async fn send_peer_message(
+    stream: &mut TcpStream,
+    message: &PeerMessage,
+) -> Result<(), Box<dyn Error>> {
+    stream
+        .write_all(&message.to_bytes())
+        .await
+        .map_err(|e| e.into())
+}
+
+async fn download_piece(
+    mut stream: TcpStream,
+    piece_index: u64,
+    piece_length: u64,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    print!("starting download of piece index: {}", piece_index);
+
+    let bitfield_msg = read_peer_message(&mut stream).await?;
+    println!("Received: {:?}", bitfield_msg);
+
+    send_peer_message(&mut stream, &PeerMessage::Interested)
+        .await
+        .unwrap();
+    println!("Send Interested message to peer");
+
+    loop {
+        let msg = read_peer_message(&mut stream).await.unwrap();
+
+        match msg {
+            PeerMessage::Choke => {
+                println!("Peer is chocked");
+            }
+
+            PeerMessage::Unchoke => {
+                println!("Peer is unchocked")
+            }
+
+            peer_message => {
+                println!("waiting...");
+                std::thread::sleep(Duration::from_secs(5));
+                print!("{:?}", peer_message);
+
+                println!("sending interested again");
+
+                send_peer_message(&mut stream, &PeerMessage::Interested).await.unwrap();
+            }
+        }
+    }
 }
