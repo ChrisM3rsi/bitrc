@@ -5,7 +5,7 @@ pub mod tracker_request;
 pub mod tracker_response;
 
 use reqwest::Client;
-use std::{error::Error, fs, net::SocketAddrV4, process::Command, time::Duration};
+use std::{error::Error, fs, net::SocketAddrV4, time::Duration};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
@@ -66,7 +66,7 @@ async fn main() {
         match connect_to_peer(*first_peer, hashed_info, peer_id_bytes).await {
             Ok(stream) => {
                 println!("Successfully connected and handshaked with {}", first_peer);
-                let piece_data = download_piece(stream, 0, torrent_metadata.info.piece_length)
+                download_pieces(stream, torrent_metadata.info.piece_length)
                     .await
                     .unwrap();
 
@@ -157,7 +157,7 @@ pub async fn connect_to_peer(
 
 async fn read_peer_message(stream: &mut TcpStream) -> Result<PeerMessage, Box<dyn Error>> {
     let mut length_bytes = [0u8; 4];
-    stream.read_exact(&mut length_bytes).await.unwrap();
+    stream.read_exact(&mut length_bytes).await.unwrap(); //TODO: handle failure and hit tracker request for other peers. 
 
     let length = u32::from_be_bytes(length_bytes);
 
@@ -182,12 +182,11 @@ async fn send_peer_message(
         .map_err(|e| e.into())
 }
 
-async fn download_piece(
+async fn download_pieces(
     mut stream: TcpStream,
-    piece_index: u64,
-    piece_length: u64,
+    piece_length: u32,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    print!("starting download of piece index: {}", piece_index);
+    print!("starting download of pieces with length: {}", piece_length);
 
     let bitfield_msg = read_peer_message(&mut stream).await?;
     println!("Received: {:?}", bitfield_msg);
@@ -195,6 +194,7 @@ async fn download_piece(
     send_peer_message(&mut stream, &PeerMessage::Interested)
         .await
         .unwrap();
+
     println!("Send Interested message to peer");
 
     loop {
@@ -206,7 +206,22 @@ async fn download_piece(
             }
 
             PeerMessage::Unchoke => {
-                println!("Peer is unchocked")
+                println!("Peer is unchocked");
+            }
+
+            PeerMessage::Have { piece_index } => {
+                let piece_data = download_piece_blocks(&mut stream, piece_index, piece_length)
+                    .await
+                    .unwrap();
+
+                // algorithm logico
+                // Request if piece is not missing
+                // add Piece handler for downloading. -> remove while loop inside Have Message handler
+
+                println!("Finished downloading piece ({} bytes) and index {}", piece_data.len(), piece_index);
+
+                let file_name = format!("pieces/piece_{}.bin", piece_index);
+                std::fs::write(file_name, &piece_data).unwrap();
             }
 
             peer_message => {
@@ -216,8 +231,65 @@ async fn download_piece(
 
                 println!("sending interested again");
 
-                send_peer_message(&mut stream, &PeerMessage::Interested).await.unwrap();
+                send_peer_message(&mut stream, &PeerMessage::Interested)
+                    .await
+                    .unwrap();
             }
         }
+    }
+
+    async fn download_piece_blocks(
+        stream: &mut TcpStream,
+        piece_index: u32,
+        piece_length: u32,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        const BLOCK_SIZE: u32 = 16 * 1024; // 16KB per request
+        let mut piece_data = Vec::new();
+        let mut begin = 0;
+
+        println!("piece_length: {}", &piece_length);
+
+        while begin < piece_length {
+            // Determine how much to request next
+            let block_length = std::cmp::min(BLOCK_SIZE, piece_length - begin);
+
+            // Build and send request
+            let request = PeerMessage::Request { //TODO: add logic to request only missing pieces.
+                index: piece_index,
+                begin,
+                length: block_length,
+            };
+            send_peer_message(stream, &request).await?;
+            println!("Requested block: begin={}, length={}", begin, block_length);
+
+            // Wait for a piece message from peer
+            let msg = read_peer_message(stream).await?;
+
+            match msg {
+                PeerMessage::Piece {
+                    index,
+                    begin: msg_begin,
+                    block,
+                } => {
+                    if index == piece_index && msg_begin == begin {
+                        println!(
+                            "Received block: {} bytes and id {} and position {}",
+                            block.len(),
+                            piece_index,
+                            begin
+                        );
+                        piece_data.extend_from_slice(&block);
+                        begin += block_length; // Move to next offset
+                    } else {
+                        return Err("Received incorrect piece or offset".into());
+                    }
+                }
+                _ => {
+                    return Err(format!("Unexpected message while downloading: {:?}", msg).into());
+                }
+            }
+        }
+
+        Ok(piece_data)
     }
 }

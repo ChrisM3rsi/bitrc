@@ -11,6 +11,15 @@ pub struct Torrent {
     pub creation_date: Option<i64>,
 }
 
+#[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
+pub struct Info {
+    pub name: String,
+    #[serde(rename = "piece length")]
+    pub piece_length: u32,
+    pub pieces: ByteBuf,
+    pub length: u64,
+}
+
 impl Torrent {
     pub fn hash_info(&self) -> [u8; 20] {
 
@@ -21,14 +30,4 @@ impl Torrent {
       
         result.into()
     }
-}
-
-
-#[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
-pub struct Info {
-    pub name: String,
-    #[serde(rename = "piece length")]
-    pub piece_length: u64,
-    pub pieces: ByteBuf,
-    pub length: u64,
 }
